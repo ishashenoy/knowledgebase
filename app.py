@@ -1,0 +1,80 @@
+from dotenv import load_dotenv
+import os
+import requests
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+from nltk.tokenize import sent_tokenize
+
+"""
+# run once on first run
+import nltk
+nltk.download('punkt_tab')
+"""
+
+load_dotenv()
+api_key = os.getenv('OPENROUTER_KEY')
+
+llm_endpoint = 'https://openrouter.ai/api/v1/chat/completions'
+
+llm_name = "nvidia/nemotron-3-super-120b-a12b:free"
+embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+
+data = "knowledge.txt"
+
+# returns a list of sentences of the og text
+def read_file(text_file):
+    with open(text_file, "r") as file:
+        content = file.read()
+        sentences = sent_tokenize(content)
+        return sentences
+
+# returns a list of n sentence paragraphs of the og text
+def chunk_text(words, n):
+    chunks = []
+
+    for i in range(0, len(words), n):
+        chunk = " ".join(words[i:i + n])
+        chunks.append(chunk)
+
+    return chunks
+
+# returns an embedding of the text (list of numbers)
+def embed_text(text):
+    embedding = embedding_model.encode(text).tolist()
+    return embedding
+
+#finds the most similar chunk of text based on the question
+def find_relevant_chunk(question, text_file):
+    
+    chunks = chunk_text(read_file(text_file), 5)
+    embeddings = [embedding_model.encode(chunk).tolist() for chunk in chunks]
+
+    most_similar = ["", 0]
+    embedded_question = embed_text(question)
+    for i in range(0, len(embeddings)):
+        similarity = cosine_similarity([embedded_question], [embeddings[i]])[0][0]
+        if similarity > most_similar[1]:
+            most_similar[0] = chunks[i]
+            most_similar[1] = similarity
+    return most_similar[0]
+
+def answer_question(question):
+    relevant_chunk = find_relevant_chunk(question, data)
+
+    response = requests.post(
+        llm_endpoint,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            'model': llm_name,
+            'messages': [
+                {"role" : "system", "content": "You are a helpful assistant. Answer the user's question using only the context provided. If the answer is not in the context, say you don't know."},
+                {"role" : "user", "content": "Context: " + relevant_chunk + "\n\nQuestion: " + question}
+            ]
+        }
+    )
+
+    return response.json()["choices"][0]["message"]["content"]
+
+question = "What is dharma and what does Krishna teach about duty and righteous action?"
+answer = answer_question(question)
+print(answer)
