@@ -4,6 +4,7 @@ import requests
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from nltk.tokenize import sent_tokenize
+import psycopg2
 
 """
 # run once on first run
@@ -21,6 +22,27 @@ embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
 data = "knowledge.txt"
 
+def store_chunks(text_file):
+    conn = psycopg2.connect(os.getenv('DATABASE_URL'))
+    cursor = conn.cursor()
+
+    chunks, embeddings = chunk_and_embed_text(text_file)
+
+    cursor.execute("INSERT INTO documents (filename) VALUES (%s) RETURNING id", (text_file,))
+    document_id = cursor.fetchone()[0]
+
+    index = 0
+    for index, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+        cursor.execute(
+            "INSERT INTO chunks (document_id, chunk_index, text, embedding) VALUES (%s, %s, %s, %s)",
+            (document_id, index, chunk, embedding)
+        )
+        index += 1
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
 # returns a list of sentences of the og text
 def read_file(text_file):
     with open(text_file, "r") as file:
@@ -29,11 +51,11 @@ def read_file(text_file):
         return sentences
 
 # returns a list of n sentence paragraphs of the og text
-def chunk_text(words, n):
+def chunk_text(sentences, n):
     chunks = []
 
-    for i in range(0, len(words), n):
-        chunk = " ".join(words[i:i + n])
+    for i in range(0, len(sentences), n):
+        chunk = " ".join(sentences[i:i + n])
         chunks.append(chunk)
 
     return chunks
@@ -43,23 +65,33 @@ def embed_text(text):
     embedding = embedding_model.encode(text).tolist()
     return embedding
 
-#finds the most similar chunk of text based on the question
-def find_relevant_chunk(question, text_file):
-    
+#one function that chunks and embeds a text file
+def chunk_and_embed_text(text_file):
     chunks = chunk_text(read_file(text_file), 5)
     embeddings = [embedding_model.encode(chunk).tolist() for chunk in chunks]
+    return chunks, embeddings
 
-    most_similar = ["", 0]
+#finds the most similar chunk of text based on the question
+def find_relevant_chunks(question):
+
     embedded_question = embed_text(question)
-    for i in range(0, len(embeddings)):
-        similarity = cosine_similarity([embedded_question], [embeddings[i]])[0][0]
-        if similarity > most_similar[1]:
-            most_similar[0] = chunks[i]
-            most_similar[1] = similarity
-    return most_similar[0]
+
+    conn = psycopg2.connect(os.getenv('DATABASE_URL'))
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT text FROM chunks ORDER BY embedding <-> %s::vector LIMIT 3", (embedded_question,))
+
+    results = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+
+    return results
 
 def answer_question(question):
-    relevant_chunk = find_relevant_chunk(question, data)
+    relevant_chunks = find_relevant_chunks(question)
+
+    context = "\n\n".join([row[0] for row in relevant_chunks])
 
     response = requests.post(
         llm_endpoint,
@@ -68,13 +100,14 @@ def answer_question(question):
             'model': llm_name,
             'messages': [
                 {"role" : "system", "content": "You are a helpful assistant. Answer the user's question using only the context provided. If the answer is not in the context, say you don't know."},
-                {"role" : "user", "content": "Context: " + relevant_chunk + "\n\nQuestion: " + question}
+                {"role" : "user", "content": "Context: " + context + "\n\nQuestion: " + question}
             ]
         }
     )
 
     return response.json()["choices"][0]["message"]["content"]
 
+store_chunks(data)
 question = "What is dharma and what does Krishna teach about duty and righteous action?"
 answer = answer_question(question)
 print(answer)
