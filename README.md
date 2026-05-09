@@ -34,7 +34,3 @@ chunk_index: int
 text: text
 embedding: vector
 ```
-
-## backend routes:
-### ingestion
-1. 
